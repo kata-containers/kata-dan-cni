@@ -1,0 +1,93 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    name: Checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      RUST_BACKTRACE: "1"
+    steps:
+      - name: Checkout the code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          persist-credentials: false
+
+      - name: Install Rust
+        run: |
+          rustup show
+          echo "${HOME}/.cargo/bin" >> "$GITHUB_PATH"
+
+      - name: Run formatting, Clippy, and unit tests
+        run: make check
+
+      - name: Build binaries
+        run: make build
+
+  integration:
+    name: TAP and OVS integration tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      KATA_DAN_TEST_LOG_DIR: ${{ github.workspace }}/target/kata-dan-integration-logs
+      RUST_BACKTRACE: "1"
+    steps:
+      - name: Checkout the code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          persist-credentials: false
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential iproute2 jq kmod openvswitch-switch util-linux
+          sudo modprobe tun
+          sudo modprobe openvswitch
+          test -c /dev/net/tun
+
+      - name: Install Rust
+        run: |
+          rustup show
+          echo "${HOME}/.cargo/bin" >> "$GITHUB_PATH"
+
+      - name: Run TAP and OVS integration tests
+        shell: bash
+        run: |
+          mkdir -p "${KATA_DAN_TEST_LOG_DIR}"
+          make test-integration 2>&1 | tee "${KATA_DAN_TEST_LOG_DIR}/ci.log"
+
+      - name: Archive failure logs
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
+        with:
+          name: kata-dan-cni-integration-logs
+          path: ${{ env.KATA_DAN_TEST_LOG_DIR }}
+          if-no-files-found: warn
+          retention-days: 7
+
+  image-build:
+    name: Build installer image
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout the code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          persist-credentials: false
+
+      - name: Build installer image
+        run: docker build -f deploy/image/Dockerfile -t kata-dan-cni:ci .
